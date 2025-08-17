@@ -35,7 +35,21 @@ class RagasEvaluationJob(Job):
 
     # TODO: maybe propose this change to Job itself
     result: EvaluateResponse | None
-    task: Optional[asyncio.Task] = None
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Store task reference as a private attribute to avoid Pydantic serialisation issues
+        self._task: Optional[asyncio.Task] = None
+    
+    @property
+    def task(self) -> Optional[asyncio.Task]:
+        """Get the underlying task."""
+        return self._task
+    
+    @task.setter
+    def task(self, value: Optional[asyncio.Task]):
+        """Set the underlying task."""
+        self._task = value
 
 
 class RagasEvaluatorInline(Eval, BenchmarksProtocolPrivate):
@@ -99,8 +113,9 @@ class RagasEvaluatorInline(Eval, BenchmarksProtocolPrivate):
 
         job_id = str(len(self.evaluation_jobs))
         job = RagasEvaluationJob(
-            job_id=job_id, status=JobStatus.in_progress, result=None, task=ragas_evaluation_task
+            job_id=job_id, status=JobStatus.in_progress, result=None
         )
+        job.task = ragas_evaluation_task
         ragas_evaluation_task.add_done_callback(
             ft.partial(self._handle_evaluation_completion, job)
         )
