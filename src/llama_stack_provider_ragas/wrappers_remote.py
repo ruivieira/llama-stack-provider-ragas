@@ -1,5 +1,6 @@
 import logging
 from typing import List, Optional
+import asyncio
 
 from langchain_core.language_models.llms import Generation, LLMResult
 from langchain_core.prompt_values import PromptValue
@@ -63,6 +64,16 @@ class LlamaStackRemoteEmbeddings(BaseRagasEmbeddings):
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
         """Async embed documents using Llama Stack client."""
         try:
+            # Check for cancellation before starting
+            try:
+                current_task = asyncio.current_task()
+                if current_task and current_task.cancelled():
+                    logger.info("Remote embedding generation was cancelled")
+                    raise asyncio.CancelledError()
+            except RuntimeError:
+                # No current task, continue
+                pass
+
             response: CreateEmbeddingsResponse = (
                 await self.async_client.embeddings.create(
                     input=texts,
@@ -70,6 +81,10 @@ class LlamaStackRemoteEmbeddings(BaseRagasEmbeddings):
                 )
             )
             return [self._validate_embedding(data.embedding) for data in response.data]
+
+        except asyncio.CancelledError:
+            logger.info("Remote embedding generation was cancelled")
+            raise
         except Exception as e:
             logger.error(f"Async document embedding failed: {str(e)}")
             raise
@@ -77,6 +92,16 @@ class LlamaStackRemoteEmbeddings(BaseRagasEmbeddings):
     async def aembed_query(self, text: str) -> list[float]:
         """Async embed query using Llama Stack client."""
         try:
+            # Check for cancellation before starting
+            try:
+                current_task = asyncio.current_task()
+                if current_task and current_task.cancelled():
+                    logger.info("Remote query embedding was cancelled")
+                    raise asyncio.CancelledError()
+            except RuntimeError:
+                # No current task, continue
+                pass
+
             response: CreateEmbeddingsResponse = (
                 await self.async_client.embeddings.create(
                     input=text,
@@ -84,6 +109,10 @@ class LlamaStackRemoteEmbeddings(BaseRagasEmbeddings):
                 )
             )
             return self._validate_embedding(response.data[0].embedding)
+
+        except asyncio.CancelledError:
+            logger.info("Remote query embedding was cancelled")
+            raise
         except Exception as e:
             logger.error(f"Async query embedding failed: {str(e)}")
             raise
@@ -202,7 +231,7 @@ class LlamaStackRemoteLLM(BaseRagasLLM):
         stop: Optional[List[str]] = None,
         callbacks=None,
     ) -> LLMResult:
-        """Asynchronous text generation using Llama Stack client."""
+        """Async text generation using Llama Stack client."""
         try:
             prompt_text, sampling_params = self._prepare_generation_params(
                 prompt, temperature
@@ -211,6 +240,16 @@ class LlamaStackRemoteLLM(BaseRagasLLM):
             llm_output = self._create_llm_output()
 
             for _ in range(n):
+                # Check for cancellation before each generation
+                try:
+                    current_task = asyncio.current_task()
+                    if current_task and current_task.cancelled():
+                        logger.info("Remote LLM generation was cancelled")
+                        raise asyncio.CancelledError()
+                except RuntimeError:
+                    # No current task, continue
+                    pass
+
                 response: CompletionResponse = (
                     await self.async_client.inference.completion(
                         content=prompt_text,
@@ -224,6 +263,9 @@ class LlamaStackRemoteLLM(BaseRagasLLM):
 
             return LLMResult(generations=[generations], llm_output=llm_output)
 
+        except asyncio.CancelledError:
+            logger.info("Remote LLM generation was cancelled")
+            raise
         except Exception as e:
             logger.error(f"Async LLM generation failed: {str(e)}")
             raise

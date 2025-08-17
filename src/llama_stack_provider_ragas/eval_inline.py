@@ -1,7 +1,7 @@
 import asyncio
 import functools as ft
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from llama_stack.apis.benchmarks import Benchmark
 from llama_stack.apis.common.job_types import Job, JobStatus
@@ -35,6 +35,7 @@ class RagasEvaluationJob(Job):
 
     # TODO: maybe propose this change to Job itself
     result: EvaluateResponse | None
+    task: Optional[asyncio.Task] = None
 
 
 class RagasEvaluatorInline(Eval, BenchmarksProtocolPrivate):
@@ -98,7 +99,7 @@ class RagasEvaluatorInline(Eval, BenchmarksProtocolPrivate):
 
         job_id = str(len(self.evaluation_jobs))
         job = RagasEvaluationJob(
-            job_id=job_id, status=JobStatus.in_progress, result=None
+            job_id=job_id, status=JobStatus.in_progress, result=None, task=ragas_evaluation_task
         )
         ragas_evaluation_task.add_done_callback(
             ft.partial(self._handle_evaluation_completion, job)
@@ -193,13 +194,21 @@ class RagasEvaluatorInline(Eval, BenchmarksProtocolPrivate):
         self, job: RagasEvaluationJob, task: asyncio.Task
     ):
         try:
-            result = task.result()
+            if task.cancelled():
+                logger.info(f"Evaluation task {job.job_id} was cancelled")
+                job.status = JobStatus.failed
+                job.result = None
+            else:
+                result = task.result()
+                job.status = JobStatus.completed
+                job.result = result
         except Exception as e:
             logger.error(f"Evaluation task failed: {e}")
             job.status = JobStatus.failed
-        else:
-            job.status = JobStatus.completed
-            job.result = result
+            job.result = None
+        finally:
+            # Clear the task reference
+            job.task = None
 
     async def evaluate_rows(
         self,
@@ -229,7 +238,37 @@ class RagasEvaluatorInline(Eval, BenchmarksProtocolPrivate):
         return self.evaluation_jobs[job_id]
 
     async def job_cancel(self, benchmark_id: str, job_id: str) -> None:
-        raise NotImplementedError("Job cancel is not implemented yet")
+        """Cancel a running evaluation job.
+
+        Args:
+            benchmark_id: The ID of the benchmark the job belongs to.
+            job_id: The ID of the job to cancel.
+
+        Raises:
+            RagasEvaluationError: If the job is not found.
+        """
+        if job_id not in self.evaluation_jobs:
+            raise RagasEvaluationError(f"Job {job_id} not found")
+
+        job = self.evaluation_jobs[job_id]
+        
+        # Check if job can be cancelled
+        if job.status == JobStatus.completed:
+            logger.info(f"Job {job_id} is already completed, cannot cancel")
+            return
+            
+        if job.status == JobStatus.failed:
+            logger.info(f"Job {job_id} is already failed, cannot cancel")
+            return
+            
+        # Cancel the underlying task
+        if job.task and not job.task.done():
+            logger.info(f"Cancelling evaluation task for job {job_id}")
+            job.task.cancel()
+            job.status = JobStatus.failed
+            job.result = None
+        else:
+            logger.warning(f"Job {job_id} has no active task to cancel")
 
     async def job_result(
         self, benchmark_id: str, job_id: str

@@ -40,12 +40,26 @@ class LlamaStackInlineEmbeddings(BaseRagasEmbeddings):
     async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
         """Embed documents using Llama Stack inference API."""
         try:
+            # Check for cancellation before starting
+            try:
+                current_task = asyncio.current_task()
+                if current_task and current_task.cancelled():
+                    logger.info("Embedding generation was cancelled")
+                    raise asyncio.CancelledError()
+            except RuntimeError:
+                # No current task, continue
+                pass
+
             response = await self.inference_api.embeddings(
                 model_id=self.embedding_model_id,
                 contents=texts,
                 task_type=EmbeddingTaskType.document,
             )
             return response.embeddings
+
+        except asyncio.CancelledError:
+            logger.info("Embedding generation was cancelled")
+            raise
         except Exception as e:
             logger.error(f"Document embedding failed: {str(e)}")
             raise
@@ -53,12 +67,26 @@ class LlamaStackInlineEmbeddings(BaseRagasEmbeddings):
     async def aembed_query(self, text: str) -> List[float]:
         """Embed query using Llama Stack inference API."""
         try:
+            # Check for cancellation before starting
+            try:
+                current_task = asyncio.current_task()
+                if current_task and current_task.cancelled():
+                    logger.info("Query embedding was cancelled")
+                    raise asyncio.CancelledError()
+            except RuntimeError:
+                # No current task, continue
+                pass
+
             response = await self.inference_api.embeddings(
                 model_id=self.embedding_model_id,
                 contents=[text],
                 task_type=EmbeddingTaskType.query,
             )
             return response.embeddings[0]
+
+        except asyncio.CancelledError:
+            logger.info("Query embedding was cancelled")
+            raise
         except Exception as e:
             logger.error(f"Query embedding failed: {str(e)}")
             raise
@@ -154,6 +182,16 @@ class LlamaStackInlineLLM(BaseRagasLLM):
             }
 
             for _ in range(n):
+                # Check for cancellation before each generation
+                try:
+                    current_task = asyncio.current_task()
+                    if current_task and current_task.cancelled():
+                        logger.info("LLM generation was cancelled")
+                        raise asyncio.CancelledError()
+                except RuntimeError:
+                    # No current task, continue
+                    pass
+
                 response = await self.inference_api.completion(
                     model_id=self.model_id,
                     content=prompt_text,
@@ -177,6 +215,9 @@ class LlamaStackInlineLLM(BaseRagasLLM):
 
             return LLMResult(generations=[generations], llm_output=llm_output)
 
+        except asyncio.CancelledError:
+            logger.info("LLM generation was cancelled")
+            raise
         except Exception as e:
             logger.error(f"LLM generation failed: {str(e)}")
             raise
