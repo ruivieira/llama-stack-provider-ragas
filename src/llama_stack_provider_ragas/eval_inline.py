@@ -211,12 +211,18 @@ class RagasEvaluatorInline(Eval, BenchmarksProtocolPrivate):
         try:
             if task.cancelled():
                 logger.info(f"Evaluation task {job.job_id} was cancelled")
-                job.status = JobStatus.failed
-                job.result = None
+                # Only update status if not already set to failed (e.g., by cancellation)
+                if job.status != JobStatus.failed:
+                    job.status = JobStatus.failed
+                    job.result = None
             else:
                 result = task.result()
                 job.status = JobStatus.completed
                 job.result = result
+        except asyncio.CancelledError:
+            logger.info(f"Evaluation task {job.job_id} was cancelled during execution")
+            job.status = JobStatus.failed
+            job.result = None
         except Exception as e:
             logger.error(f"Evaluation task failed: {e}")
             job.status = JobStatus.failed
@@ -250,7 +256,28 @@ class RagasEvaluatorInline(Eval, BenchmarksProtocolPrivate):
         if job_id not in self.evaluation_jobs:
             raise RagasEvaluationError(f"Job {job_id} not found")
 
-        return self.evaluation_jobs[job_id]
+        job = self.evaluation_jobs[job_id]
+        logger.debug(f"Job {job_id} status requested: {job.status}")
+        return job
+
+    def _is_job_cancellable(self, job: RagasEvaluationJob) -> bool:
+        """Check if a job can be cancelled.
+        
+        Args:
+            job: The job to check.
+            
+        Returns:
+            True if the job can be cancelled, False otherwise.
+        """
+        if job.status == JobStatus.completed:
+            return False
+        if job.status == JobStatus.failed:
+            return False
+        if not job.task:
+            return False
+        if job.task.done():
+            return False
+        return True
 
     async def job_cancel(self, benchmark_id: str, job_id: str) -> None:
         """Cancel a running evaluation job.
@@ -267,23 +294,34 @@ class RagasEvaluatorInline(Eval, BenchmarksProtocolPrivate):
 
         job = self.evaluation_jobs[job_id]
         
+        logger.info(f"Attempting to cancel job {job_id} with status: {job.status}")
+        
         # Check if job can be cancelled
-        if job.status == JobStatus.completed:
-            logger.info(f"Job {job_id} is already completed, cannot cancel")
-            return
-            
-        if job.status == JobStatus.failed:
-            logger.info(f"Job {job_id} is already failed, cannot cancel")
+        if not self._is_job_cancellable(job):
+            logger.info(f"Job {job_id} cannot be cancelled (status: {job.status})")
             return
             
         # Cancel the underlying task
-        if job.task and not job.task.done():
-            logger.info(f"Cancelling evaluation task for job {job_id}")
+        logger.info(f"Cancelling evaluation task for job {job_id}")
+        if job.task:
             job.task.cancel()
+            
+            # Immediately update job status to reflect cancellation
             job.status = JobStatus.failed
             job.result = None
+            
+            # Wait a bit for the task to actually cancel
+            try:
+                await asyncio.wait_for(job.task, timeout=0.1)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                # Task is being cancelled, which is expected
+                pass
         else:
-            logger.warning(f"Job {job_id} has no active task to cancel")
+            # No task to cancel, just update status
+            job.status = JobStatus.failed
+            job.result = None
+        
+        logger.info(f"Job {job_id} cancellation completed, final status: {job.status}")
 
     async def job_result(
         self, benchmark_id: str, job_id: str
